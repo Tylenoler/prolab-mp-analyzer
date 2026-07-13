@@ -78,10 +78,14 @@ class ReadOverviewPage(QWidget):
         super().__init__(parent)
         self.colors = colors or COLORS
         self.data = None
+        self.fans_data = None
         self.current_range = 'all'
         self.range_btns = {}
         self._cursors = []
         self._init_ui()
+
+    def set_fans_data(self, fans_data):
+        self.fans_data = fans_data
 
     def _init_ui(self):
         scroll = QScrollArea()
@@ -128,6 +132,10 @@ class ReadOverviewPage(QWidget):
         kpi_layout.addWidget(self.kpi_avg)
         kpi_layout.addWidget(self.kpi_peak)
         kpi_layout.addWidget(self.kpi_share)
+        self.kpi_read_week = _make_kpi("阅读周环比", "—", '#F97316', self.colors)
+        self.kpi_follow_week = _make_kpi("关注周环比", "—", '#EC4899', self.colors)
+        kpi_layout.addWidget(self.kpi_read_week)
+        kpi_layout.addWidget(self.kpi_follow_week)
         layout.addLayout(kpi_layout)
 
         # === Trend Chart ===
@@ -172,6 +180,33 @@ class ReadOverviewPage(QWidget):
         bottom.addWidget(art_card, 1)
 
         layout.addLayout(bottom)
+
+        # === Read → Follow Conversion Chart ===
+        conv_card = _make_card(self.colors)
+        cvl = QVBoxLayout(conv_card)
+        cvl.setContentsMargins(16, 12, 16, 8)
+        conv_title = QLabel("阅读 vs 关注转化")
+        conv_title.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {self.colors['text_dark']}; border: none; font-family: '{CJK}';")
+        cvl.addWidget(conv_title)
+        self.conv_fig = Figure(figsize=(8, 3), dpi=100, facecolor='white')
+        self.conv_canvas = FigureCanvas(self.conv_fig)
+        self.conv_canvas.setStyleSheet("background: white;")
+        cvl.addWidget(self.conv_canvas)
+        layout.addWidget(conv_card)
+
+        # === Share → Read Lag Correlation Chart ===
+        lag_card = _make_card(self.colors)
+        lgl = QVBoxLayout(lag_card)
+        lgl.setContentsMargins(16, 12, 16, 8)
+        lag_title = QLabel("分享与阅读关联")
+        lag_title.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {self.colors['text_dark']}; border: none; font-family: '{CJK}';")
+        lgl.addWidget(lag_title)
+        self.lag_fig = Figure(figsize=(8, 3), dpi=100, facecolor='white')
+        self.lag_canvas = FigureCanvas(self.lag_fig)
+        self.lag_canvas.setStyleSheet("background: white;")
+        lgl.addWidget(self.lag_canvas)
+        layout.addWidget(lag_card)
+
         layout.addStretch()
         scroll.setWidget(container)
         outer = QVBoxLayout(self)
@@ -255,16 +290,22 @@ class ReadOverviewPage(QWidget):
         self._draw_trend(data)
         self._draw_channel(data)
         self._draw_articles(data)
+        self._draw_conversion(data)
+        self._draw_lag(data)
 
     def _show_empty(self):
         self._set_kpi(self.kpi_total, "—")
         self._set_kpi(self.kpi_avg, "—")
         self._set_kpi(self.kpi_peak, "—")
         self._set_kpi(self.kpi_share, "—")
+        self._set_kpi(self.kpi_read_week, "—")
+        self._set_kpi(self.kpi_follow_week, "—")
         for fig, canvas in [
             (self.trend_fig, self.trend_canvas),
             (self.channel_fig, self.channel_canvas),
             (self.article_fig, self.article_canvas),
+            (self.conv_fig, self.conv_canvas),
+            (self.lag_fig, self.lag_canvas),
         ]:
             fig.clear()
             ax = fig.add_subplot(111)
@@ -291,6 +332,31 @@ class ReadOverviewPage(QWidget):
         if 'daily_summary' in data:
             df = data['daily_summary']
             self._set_kpi(self.kpi_share, f"{df['shares'].sum():,}")
+
+        # Week-over-week growth rate for reads
+        if 'daily_summary' in data:
+            sdf = data['daily_summary'].sort_values('date')
+            if len(sdf) >= 14:
+                this_week = sdf.tail(7)
+                prev_week = sdf.iloc[-14:-7]
+                tw_avg = this_week['shares'].mean()
+                pw_avg = prev_week['shares'].mean()
+                if pw_avg > 0:
+                    pct = (tw_avg - pw_avg) / pw_avg * 100
+                    self._set_kpi(self.kpi_read_week, f"{pct:+.1f}%")
+
+        # Week-over-week for followers (from fans_data)
+        if hasattr(self, 'fans_data') and self.fans_data and 'fans_data' in self.fans_data:
+            fdf = self.fans_data['fans_data'].sort_values('date')
+            col = '累积关注人数'
+            if col in fdf.columns and len(fdf) >= 14:
+                this_week = fdf.tail(7)
+                prev_week = fdf.iloc[-14:-7]
+                tw_avg = this_week[col].mean()
+                pw_avg = prev_week[col].mean()
+                if pw_avg > 0:
+                    pct = (tw_avg - pw_avg) / pw_avg * 100
+                    self._set_kpi(self.kpi_follow_week, f"{pct:+.1f}%")
 
     def _set_kpi(self, card, value):
         lbl = card.findChild(QLabel, "kpi_value")
@@ -327,6 +393,18 @@ class ReadOverviewPage(QWidget):
         ax.spines['bottom'].set_color('#E5E7EB')
         ax.tick_params(colors='#888', labelsize=9)
         ax.grid(axis='y', alpha=0.3, color='#E5E7EB')
+
+        # 7-day and 30-day moving averages
+        if len(total_df) >= 7:
+            total_df['ma7'] = total_df['readers'].rolling(7, min_periods=7).mean()
+            ax.plot(total_df['date'], total_df['ma7'], color=CHART_COLORS[2],
+                    linewidth=1.5, linestyle='--', alpha=0.7, label='7日平均')
+        if len(total_df) >= 30:
+            total_df['ma30'] = total_df['readers'].rolling(30, min_periods=30).mean()
+            ax.plot(total_df['date'], total_df['ma30'], color=CHART_COLORS[4],
+                    linewidth=1.5, linestyle=':', alpha=0.6, label='30日平均')
+
+        ax.legend(fontsize=8, loc='upper left')
         self.trend_fig.subplots_adjust(left=0.08, right=0.96, top=0.95, bottom=0.25)
         self.trend_canvas.draw()
 
@@ -445,6 +523,140 @@ class ReadOverviewPage(QWidget):
                 full_title = ranking.index[idx]
                 value = ranking.values[idx]
                 sel.annotation.set_text(f" {full_title}  阅读: {value:,} ")
+                sel.annotation.get_bbox_patch().set(fc="white", alpha=0.95, ec="#D1D5DB", lw=0.5)
+                sel.annotation.set_fontsize(9)
+                sel.annotation.set_fontfamily(CJK)
+            self._cursors.append(cursor)
+
+    def _draw_conversion(self, data):
+        """Read vs new followers dual-axis chart."""
+        self.conv_fig.clear()
+        ax = self.conv_fig.add_subplot(111)
+        if not self.fans_data or 'fans_data' not in self.fans_data:
+            ax.text(0.5, 0.5, '导入关注者数据后显示此图表', ha='center', va='center', fontsize=12, color='#999')
+            ax.set_axis_off()
+            self.conv_canvas.draw()
+            return
+
+        # Build daily readers series
+        fdf = data.get('daily_summary')
+        if fdf is None or fdf.empty:
+            ax.text(0.5, 0.5, '暂无数据', ha='center', va='center', fontsize=14, color='#999')
+            ax.set_axis_off()
+            self.conv_canvas.draw()
+            return
+
+        fdf = fdf.sort_values('date').copy()
+        # Merge with fans new follows
+        fans = self.fans_data['fans_data'].sort_values('date')
+        new_col = '新关注人数'
+        if new_col not in fans.columns:
+            ax.text(0.5, 0.5, '暂无新关注数据', ha='center', va='center', fontsize=12, color='#999')
+            ax.set_axis_off()
+            self.conv_canvas.draw()
+            return
+
+        # Align data by date
+        merged = pd.merge(fdf, fans[['date', new_col]], on='date', how='inner')
+        if merged.empty:
+            ax.text(0.5, 0.5, '暂无日期重叠数据', ha='center', va='center', fontsize=12, color='#999')
+            ax.set_axis_off()
+            self.conv_canvas.draw()
+            return
+
+        line = ax.plot(merged['date'], merged['shares'], color=CHART_COLORS[0],
+                       linewidth=2, marker='o', markersize=3, label='阅读人数')
+        ax.set_ylabel('阅读人数', fontsize=10, color=CHART_COLORS[0])
+        ax.tick_params(axis='y', colors=CHART_COLORS[0], labelsize=9)
+
+        ax2 = ax.twinx()
+        bars = ax2.bar(merged['date'], merged[new_col].fillna(0),
+                       alpha=0.4, color=CHART_COLORS[1], width=0.7, label='新关注')
+        ax2.set_ylabel('新关注人数', fontsize=10, color=CHART_COLORS[1])
+        ax2.tick_params(axis='y', colors=CHART_COLORS[1], labelsize=9)
+        ax2.spines['top'].set_visible(False)
+
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.spines['top'].set_visible(False)
+        ax.spines['left'].set_color('#E5E7EB')
+        ax.spines['bottom'].set_color('#E5E7EB')
+        ax.tick_params(colors='#888', labelsize=9)
+        ax.grid(axis='y', alpha=0.3, color='#E5E7EB')
+        lines1 = [line[0]]
+        lines2 = [bars]
+        labels = ['阅读人数', '新关注']
+        ax.legend(lines1 + lines2, labels, fontsize=8, loc='upper left')
+        self.conv_fig.subplots_adjust(left=0.08, right=0.88, top=0.95, bottom=0.25)
+        self.conv_canvas.draw()
+
+        if HAS_MPLCURSORS:
+            scatter = ax.scatter(merged['date'], merged['shares'], s=20, color=CHART_COLORS[0], zorder=5)
+            cursor = mplcursors.cursor(scatter, hover=mplcursors.HoverMode.Transient)
+            @cursor.connect("add")
+            def on_add(sel):
+                idx = sel.index
+                row = merged.iloc[idx]
+                ds = row['date'].strftime('%Y-%m-%d') if hasattr(row['date'], 'strftime') else str(row['date'])
+                new_fans = int(row[new_col]) if pd.notna(row[new_col]) else 0
+                sel.annotation.set_text(f" {ds}  阅读: {int(row['shares']):,}  新关注: {new_fans}")
+                sel.annotation.get_bbox_patch().set(fc="white", alpha=0.95, ec="#D1D5DB", lw=0.5)
+                sel.annotation.set_fontsize(9)
+                sel.annotation.set_fontfamily(CJK)
+            self._cursors.append(cursor)
+
+    def _draw_lag(self, data):
+        """Share vs read correlation chart with optional lag."""
+        self.lag_fig.clear()
+        ax = self.lag_fig.add_subplot(111)
+        fdf = data.get('daily_summary')
+        if fdf is None or fdf.empty:
+            ax.text(0.5, 0.5, '暂无数据', ha='center', va='center', fontsize=14, color='#999')
+            ax.set_axis_off()
+            self.lag_canvas.draw()
+            return
+
+        df = fdf.sort_values('date').copy()
+        # Shift shares by 1 day to check lead/lag
+        df['shares_lag1'] = df['shares'].shift(1)
+
+        ax.fill_between(df['date'], df['shares'], alpha=0.15, color=CHART_COLORS[0])
+        ax.plot(df['date'], df['shares'], color=CHART_COLORS[0],
+                linewidth=2, marker='o', markersize=3, label='当日分享')
+        ax.set_ylabel('分享数', fontsize=10, color=CHART_COLORS[0])
+        ax.tick_params(axis='y', colors=CHART_COLORS[0], labelsize=9)
+
+        ax2 = ax.twinx()
+        ax2.plot(df['date'], df['shares_lag1'], color=CHART_COLORS[2],
+                 linewidth=1.5, linestyle='--', alpha=0.7, label='前一日分享(滞后)')
+        ax2.set_ylabel('阅读人数', fontsize=10, color=CHART_COLORS[2])
+        ax2.tick_params(axis='y', colors=CHART_COLORS[2], labelsize=9)
+        ax2.spines['top'].set_visible(False)
+
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.spines['top'].set_visible(False)
+        ax.spines['left'].set_color('#E5E7EB')
+        ax.spines['right'].set_color('#E5E7EB')
+        ax.spines['bottom'].set_color('#E5E7EB')
+        ax.tick_params(colors='#888', labelsize=9)
+        ax.grid(axis='y', alpha=0.3, color='#E5E7EB')
+        lines1 = [ax.get_lines()[0]]
+        lines2 = [ax2.get_lines()[0]]
+        ax.legend(lines1 + lines2, ['当日分享', '前日分享(滞后1天)'], fontsize=8, loc='upper left')
+        self.lag_fig.subplots_adjust(left=0.08, right=0.88, top=0.95, bottom=0.25)
+        self.lag_canvas.draw()
+
+        if HAS_MPLCURSORS:
+            scatter = ax.scatter(df['date'], df['shares'], s=20, color=CHART_COLORS[0], zorder=5)
+            cursor = mplcursors.cursor(scatter, hover=mplcursors.HoverMode.Transient)
+            @cursor.connect("add")
+            def on_add(sel):
+                idx = sel.index
+                row = df.iloc[idx]
+                ds = row['date'].strftime('%Y-%m-%d') if hasattr(row['date'], 'strftime') else str(row['date'])
+                lag_v = int(row['shares_lag1']) if pd.notna(row['shares_lag1']) else 0
+                sel.annotation.set_text(f" {ds}  分享: {int(row['shares']):,}  前日分享: {lag_v}")
                 sel.annotation.get_bbox_patch().set(fc="white", alpha=0.95, ec="#D1D5DB", lw=0.5)
                 sel.annotation.set_fontsize(9)
                 sel.annotation.set_fontfamily(CJK)

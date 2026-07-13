@@ -225,10 +225,14 @@ class MainWindow(QMainWindow):
         if read_files:
             self.read_data = parse_read_excel(read_files)
             self.page_read.update_data(self.read_data)
+            if self.fans_data:
+                self.page_read.set_fans_data(self.fans_data)
             self.switch_page(0)
         if fans_files:
             self.fans_data = parse_fans_excel(fans_files)
             self.page_fans.update_data(self.fans_data)
+            if self.read_data:
+                self.page_fans.set_read_data(self.read_data)
             self.switch_page(1)
 
         if not read_files and not fans_files:

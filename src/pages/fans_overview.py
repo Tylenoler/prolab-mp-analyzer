@@ -78,10 +78,14 @@ class FansOverviewPage(QWidget):
         super().__init__(parent)
         self.colors = colors or COLORS
         self.data = None
+        self.read_data = None
         self.current_range = 'all'
         self.range_btns = {}
         self._cursors = []
         self._init_ui()
+
+    def set_read_data(self, read_data):
+        self.read_data = read_data
 
     def _init_ui(self):
         scroll = QScrollArea()
@@ -128,6 +132,10 @@ class FansOverviewPage(QWidget):
         kpi_layout.addWidget(self.kpi_gain)
         kpi_layout.addWidget(self.kpi_peak)
         kpi_layout.addWidget(self.kpi_avg)
+        self.kpi_week_gain = _make_kpi("关注周环比", "—", '#F97316', self.colors)
+        self.kpi_accel = _make_kpi("增长加速度", "—", '#EC4899', self.colors)
+        kpi_layout.addWidget(self.kpi_week_gain)
+        kpi_layout.addWidget(self.kpi_accel)
         layout.addLayout(kpi_layout)
 
         # === Trend Chart ===
@@ -155,6 +163,19 @@ class FansOverviewPage(QWidget):
         self.breakdown_canvas.setStyleSheet("background: white;")
         bl.addWidget(self.breakdown_canvas)
         layout.addWidget(breakdown_card)
+
+        # === Acceleration Chart ===
+        accel_card = _make_card(self.colors)
+        acl = QVBoxLayout(accel_card)
+        acl.setContentsMargins(16, 12, 16, 8)
+        accel_title = QLabel("增长加速度（日增量变化率）")
+        accel_title.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {self.colors['text_dark']}; border: none; font-family: '{CJK}';")
+        acl.addWidget(accel_title)
+        self.accel_fig = Figure(figsize=(8, 2.5), dpi=100, facecolor='white')
+        self.accel_canvas = FigureCanvas(self.accel_fig)
+        self.accel_canvas.setStyleSheet("background: white;")
+        acl.addWidget(self.accel_canvas)
+        layout.addWidget(accel_card)
 
         # === Placeholder ===
         self.placeholder = QLabel(
@@ -249,12 +270,15 @@ class FansOverviewPage(QWidget):
         self._update_kpis(data)
         self._draw_trend(data)
         self._draw_breakdown(data)
+        self._draw_accel(data)
 
     def _show_empty(self):
         self._set_kpi(self.kpi_total, "—")
         self._set_kpi(self.kpi_gain, "—")
         self._set_kpi(self.kpi_peak, "—")
         self._set_kpi(self.kpi_avg, "—")
+        self._set_kpi(self.kpi_week_gain, "—")
+        self._set_kpi(self.kpi_accel, "—")
         self._clear_cursors()
         self.trend_fig.clear()
         ax = self.trend_fig.add_subplot(111)
@@ -268,6 +292,12 @@ class FansOverviewPage(QWidget):
                 ha='center', va='center', fontsize=14, color='#999', fontfamily=CJK)
         ax2.set_axis_off()
         self.breakdown_canvas.draw()
+        self.accel_fig.clear()
+        ax3 = self.accel_fig.add_subplot(111)
+        ax3.text(0.5, 0.5, '所选时间段内暂无数据',
+                ha='center', va='center', fontsize=14, color='#999', fontfamily=CJK)
+        ax3.set_axis_off()
+        self.accel_canvas.draw()
 
     # === KPIs ===
 
@@ -292,6 +322,21 @@ class FansOverviewPage(QWidget):
         self._set_kpi(self.kpi_gain, f"{int(gain):+}")
         self._set_kpi(self.kpi_peak, f"{peak:,}")
         self._set_kpi(self.kpi_avg, f"{avg:,.1f}")
+
+        # Week-over-week growth
+        if len(df) >= 14:
+            this_week = df.tail(7)
+            prev_week = df.iloc[-14:-7]
+            tw_avg = this_week['净增关注人数'].mean() if '净增关注人数' in this_week.columns else 0
+            pw_avg = prev_week['净增关注人数'].mean() if '净增关注人数' in prev_week.columns else 0
+            if pw_avg and pw_avg != 0:
+                pct = (tw_avg - pw_avg) / pw_avg * 100
+                self._set_kpi(self.kpi_week_gain, f"{pct:+.1f}%")
+        # Acceleration (second derivative of cumulative)
+        accel = daily_diff.diff().dropna()
+        if not accel.empty:
+            avg_accel = accel.mean()
+            self._set_kpi(self.kpi_accel, f"{avg_accel:+.1f}")
 
     def _set_kpi(self, card, value):
         lbl = card.findChild(QLabel, "kpi_value")
@@ -335,6 +380,18 @@ class FansOverviewPage(QWidget):
         ax.spines['bottom'].set_color('#E5E7EB')
         ax.tick_params(colors='#888', labelsize=9)
         ax.grid(axis='y', alpha=0.3, color='#E5E7EB')
+
+        # 7-day and 30-day moving averages
+        if len(df) >= 7:
+            df['ma7'] = df[col].rolling(7, min_periods=7).mean()
+            ax.plot(df['date'], df['ma7'], color=CHART_COLORS[2],
+                    linewidth=1.5, linestyle='--', alpha=0.7, label='7日平均')
+        if len(df) >= 30:
+            df['ma30'] = df[col].rolling(30, min_periods=30).mean()
+            ax.plot(df['date'], df['ma30'], color=CHART_COLORS[4],
+                    linewidth=1.5, linestyle=':', alpha=0.6, label='30日平均')
+
+        ax.legend(fontsize=8, loc='upper left')
         self.trend_fig.subplots_adjust(left=0.08, right=0.88, top=0.95, bottom=0.25)
         self.trend_canvas.draw()
 
@@ -436,6 +493,58 @@ class FansOverviewPage(QWidget):
                     sel.annotation.get_bbox_patch().set(fc="white", alpha=0.95, ec="#D1D5DB", lw=0.5)
                     sel.annotation.set_fontsize(9)
                     sel.annotation.set_fontfamily(CJK)
+                self._cursors.append(cursor)
+
+    def _draw_accel(self, data):
+        """Second derivative: acceleration of daily new followers."""
+        self.accel_fig.clear()
+        ax = self.accel_fig.add_subplot(111)
+        df = data['fans_data'].sort_values('date')
+        col = '净增关注人数'
+        if col not in df.columns:
+            ax.text(0.5, 0.5, '暂无净增数据', ha='center', va='center', fontsize=12, color='#999')
+            ax.set_axis_off()
+            self.accel_canvas.draw()
+            return
+
+        daily = df[col].fillna(0)
+        accel = daily.diff().dropna()  # Δ² = change of net-change
+        if accel.empty:
+            ax.text(0.5, 0.5, '数据不足以计算加速度', ha='center', va='center', fontsize=12, color='#999')
+            ax.set_axis_off()
+            self.accel_canvas.draw()
+            return
+
+        accel_dates = df['date'].iloc[1:]  # align with accel (one less row)
+        colors = [CHART_COLORS[1] if v >= 0 else CHART_COLORS[3] for v in accel]
+        ax.bar(accel_dates, accel, color=colors, alpha=0.7, width=0.7)
+        ax.axhline(y=0, color='#CCC', linewidth=0.5)
+        ax.set_ylabel('加速度（Δ²）', fontsize=10, color='#666')
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_color('#E5E7EB')
+        ax.spines['bottom'].set_color('#E5E7EB')
+        ax.tick_params(colors='#888', labelsize=9)
+        ax.grid(axis='y', alpha=0.3, color='#E5E7EB')
+        self.accel_fig.subplots_adjust(left=0.08, right=0.96, top=0.95, bottom=0.25)
+        self.accel_canvas.draw()
+
+        if HAS_MPLCURSORS:
+            bars = ax.containers[0] if ax.containers else None
+            if bars:
+                cursor = mplcursors.cursor(bars, hover=mplcursors.HoverMode.Transient)
+                @cursor.connect("add")
+                def on_add(sel):
+                    idx = sel.index
+                    if idx < len(accel):
+                        ds = accel_dates.iloc[idx].strftime('%Y-%m-%d') if hasattr(accel_dates.iloc[idx], 'strftime') else str(accel_dates.iloc[idx])
+                        v = accel.iloc[idx]
+                        sel.annotation.set_text(f" {ds}  加速度: {v:+.1f}")
+                        sel.annotation.get_bbox_patch().set(fc="white", alpha=0.95, ec="#D1D5DB", lw=0.5)
+                        sel.annotation.set_fontsize(9)
+                        sel.annotation.set_fontfamily(CJK)
                 self._cursors.append(cursor)
 
     def _clear_cursors(self):
